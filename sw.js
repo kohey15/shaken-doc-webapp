@@ -3,11 +3,14 @@
 // バックエンドサーバーが存在しない前提のため、共有されたファイルは
 // サーバーに送らずCache Storage APIに一時保存し、ページ読み込み時に取り出す。
 
-const APP_SHELL_CACHE = "app-shell-v1";
+const APP_SHELL_CACHE = "app-shell-v2";
 const SHARE_CACHE = "shakensho-share-v1";
 const SHARED_KEY = "/__shared-shakensho__";
 
-const APP_SHELL_FILES = [
+// コード本体(HTML/JS/マニフェスト): 更新のたびにキャッシュ版が古いまま残って
+// 修正が反映されないトラブルを防ぐため、fetch時は「まずネットワーク」を試す
+// (ネットワークが使えない時だけキャッシュにフォールバックするオフライン対応)。
+const NETWORK_FIRST_FILES = [
   "./",
   "./index.html",
   "./settings.html",
@@ -18,6 +21,11 @@ const APP_SHELL_FILES = [
   "./js/pdfgen.js",
   "./js/pdf_fields.js",
   "./js/app.js",
+];
+
+// 大きく・めったに変わらない静的資産(フォント・帳票テンプレート): 毎回
+// 再ダウンロードすると重いため、従来通りキャッシュ優先にする。
+const CACHE_FIRST_FILES = [
   "./assets/fonts/NotoSansJP-Regular-static.ttf",
   "./assets/icons/icon-192.png",
   "./assets/icons/icon-512.png",
@@ -26,6 +34,8 @@ const APP_SHELL_FILES = [
   "./templates/ininjo.pdf",
   "./templates/juryozei_nofusho_1.pdf",
 ];
+
+const APP_SHELL_FILES = [...NETWORK_FIRST_FILES, ...CACHE_FIRST_FILES];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -72,6 +82,22 @@ self.addEventListener("fetch", (event) => {
 
   if (event.request.method !== "GET" || url.origin !== self.location.origin) {
     return; // 対象外はService Workerを介さず通常通り処理させる
+  }
+
+  const isNetworkFirst = NETWORK_FIRST_FILES.some((f) => new URL(f, self.location).href === url.href);
+
+  if (isNetworkFirst) {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          if (response && response.ok) {
+            caches.open(APP_SHELL_CACHE).then((cache) => cache.put(event.request, response.clone()));
+          }
+          return response;
+        })
+        .catch(() => caches.match(event.request))
+    );
+    return;
   }
 
   event.respondWith(
