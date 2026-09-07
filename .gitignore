@@ -1,0 +1,4 @@
+.venv_serve/
+_dev_cert.pem
+_dev_key.pem
+_dev_qr.png

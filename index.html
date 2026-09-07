@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#1e5ab4" />
+<link rel="manifest" href="./manifest.json" />
+<link rel="apple-touch-icon" href="./assets/icons/icon-192.png" />
+<title>車検書類作成システム</title>
+<style>
+  :root {
+    --primary: #1e5ab4; --primary-dark: #163f80; --bg: #f2f5fa;
+    --card: #ffffff; --border: #d8e0ee; --text: #222; --text-muted: #666;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Hiragino Sans", "Yu Gothic Medium", "Yu Gothic", Meiryo, sans-serif;
+    max-width: 640px; margin: 0 auto; padding: 16px 16px 40px;
+    background: var(--bg); color: var(--text); font-size: 16px; line-height: 1.65;
+  }
+  h1 { font-size: 18px; color: var(--primary-dark); margin: 8px 0 4px; text-wrap: balance; }
+  #status { font-size: 14px; min-height: 20px; font-weight: bold; padding: 4px 0; }
+  #status.status-err { color: #a02834; }
+  #status.status-ok { color: #2c662d; }
+
+  .step {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; margin-bottom: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  .step h2 {
+    margin: 0 0 12px; font-size: 16px; color: var(--primary-dark);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .step h2 .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border-radius: 50%; background: var(--primary);
+    color: #fff; font-size: 13px; flex-shrink: 0;
+  }
+  .step h3 { font-size: 14px; margin: 16px 0 8px; color: var(--primary-dark); }
+
+  label { display: block; margin-top: 10px; font-size: 13.5px; color: #444; font-weight: 500; }
+  input[type=text] {
+    width: 100%; padding: 11px 10px; font-size: 16px; margin-top: 3px;
+    border: 1px solid #bcc7d6; border-radius: 6px; background: #fbfcfe;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--primary); background: #fff; }
+
+  button {
+    width: 100%; padding: 13px 16px; font-size: 15.5px; margin-top: 10px; cursor: pointer;
+    border: none; border-radius: 6px; background: var(--primary); color: #fff; font-weight: bold;
+  }
+  button:hover { background: var(--primary-dark); }
+  button:disabled { background: #aab6c8; cursor: not-allowed; }
+  .danger { background: #c0392b; }
+  .danger:hover { background: #96261c; }
+  .secondary { background: #fff; color: var(--primary); border: 1px solid var(--primary); }
+  .secondary:hover { background: #eef4fc; }
+
+  .doc-choice { display: flex; flex-direction: column; gap: 10px; margin: 10px 0; }
+  .doc-choice label {
+    display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14.5px; font-weight: bold;
+    background: #f4f6fa; border: 1.5px solid var(--border); border-radius: 8px; padding: 12px 14px;
+  }
+  .doc-choice input[type=checkbox], .doc-choice input[type=radio] { width: 20px; height: 20px; accent-color: var(--primary); }
+  .doc-choice label:has(input:checked) { background: #e7f0fb; border-color: var(--primary); color: var(--primary-dark); }
+  .doc-choice label.disabled { opacity: 0.55; }
+  .badge-soon { font-size: 11px; background: #eee; color: #777; border-radius: 10px; padding: 2px 8px; font-weight: normal; }
+
+  .checklist { background: #fff4e5; border: 1px solid #e8a33d; border-radius: 8px; padding: 14px; margin: 14px 0; font-size: 13.5px; }
+  .checklist label { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; font-size: 13.5px; font-weight: normal; }
+  .checklist input[type=checkbox] { width: 18px; height: 18px; margin-top: 1px; accent-color: #b5650a; }
+
+  .doc-result { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-top: 12px; background: #fafbfd; }
+  .doc-result h4 { margin: 0 0 8px; font-size: 15px; color: var(--primary-dark); }
+  iframe { width: 100%; height: min(65vh, 520px); border: 1px solid var(--border); border-radius: 6px; }
+
+  .waiting { color: var(--text-muted); }
+  .detected { color: #1a7a33; font-weight: bold; }
+  .privacy-note { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+  #shakenshoStatus { padding: 12px; border-radius: 6px; background: #f4f6fa; border: 1px solid var(--border); }
+
+  .camera-area video { width: 100%; border-radius: 6px; background: #000; display: block; }
+  .camera-area canvas { display: none; }
+  .doc-type-choice { display: flex; gap: 10px; margin: 10px 0; }
+  .doc-type-choice label { flex: 1; text-align: center; }
+</style>
+</head>
+<body>
+<p style="text-align:right; margin:0"><a href="./settings.html" style="font-size:13px; color:var(--primary); text-decoration:none;">&#9881; 設定</a></p>
+<h1>車検書類作成システム — 車検・名義変更書類 自動作成</h1>
+<p id="status"></p>
+
+<div class="step">
+  <h2><span class="num">1</span> 手続きの種類を選択</h2>
+  <div class="doc-choice" id="procedureChoice"></div>
+</div>
+
+<div id="wizardSteps" style="display:none">
+
+  <div class="step" id="stepShakensho">
+    <h2><span class="num">2</span> 車検証の読み込み</h2>
+    <p id="shakenshoStatus" class="waiting">
+      スマートフォンの「車検証閲覧アプリ」で車検証を読み取り、共有一覧から
+      「車検書類作成」を選んでください。選ぶとこの画面に自動的に反映されます。
+    </p>
+    <p class="privacy-note">※車検証データはこの端末の中だけで処理され、外部やサーバーには一切送信されません。</p>
+  </div>
+
+  <div class="step" id="stepOcr">
+    <h2><span class="num">3</span> 住民票・印鑑証明書の読み取り</h2>
+    <div id="ocrBlocksContainer"></div>
+    <p class="privacy-note">※撮影した画像はこの端末の中だけで処理され、文字を読み取った時点で破棄されます(保存されません)。</p>
+  </div>
+
+  <div class="step">
+    <h2><span class="num">4</span> 内容確認・修正</h2>
+
+    <h3>車両情報</h3>
+    <label>車台番号</label>
+    <input type="text" id="shatai_bangou" />
+    <div>
+      <label>自動車登録番号: 運輸支局名</label>
+      <input type="text" id="touroku_jimusho" maxlength="4" />
+      <label>分類番号(3桁)</label>
+      <input type="text" id="touroku_bunrui" maxlength="3" />
+      <label>ひらがな</label>
+      <input type="text" id="touroku_kana" maxlength="1" />
+      <label>一連番号(4桁)</label>
+      <input type="text" id="touroku_ichirenban" maxlength="4" />
+    </div>
+    <div id="gyomuShubetsuBlock" style="display:none">
+      <label>業務種別コード(継続検査は 1)</label>
+      <input type="text" id="gyomu_shubetsu" value="1" maxlength="1" />
+    </div>
+
+    <h3>当事者情報</h3>
+    <div id="roleFieldsContainer"></div>
+
+    <div id="juryozeiBlock" style="display:none">
+      <h3>自動車重量税納付書の追加情報</h3>
+      <label>自動車検査証の有効期間</label>
+      <div class="doc-choice">
+        <label><input type="radio" name="juryozeiKikan" value="2nen" checked /> 2年</label>
+        <label><input type="radio" name="juryozeiKikan" value="3nen" /> 3年</label>
+        <label><input type="radio" name="juryozeiKikan" value="1nen" /> 1年</label>
+      </div>
+      <label>自家用・事業用の別</label>
+      <div class="doc-choice">
+        <label><input type="radio" name="juryozeiJika" value="jika" checked /> 自家用</label>
+        <label><input type="radio" name="juryozeiJika" value="jigyou" /> 事業用</label>
+      </div>
+      <label>自動車の区分</label>
+      <div class="doc-choice">
+        <label><input type="radio" name="juryozeiKubun" value="you" checked /> 乗用自動車</label>
+        <label><input type="radio" name="juryozeiKubun" value="kamotsu" /> 貨物(総重量2.5t以下)</label>
+        <label><input type="radio" name="juryozeiKubun" value="nirin" /> 二輪の小型自動車</label>
+        <label><input type="radio" name="juryozeiKubun" value="sonota" /> その他の自動車</label>
+      </div>
+      <p class="privacy-note">※納付税額・車両重量の欄は空欄のまま印刷されます(税額表の確認が必要なため)。運輸支局窓口で確認し、手書きで記入してください。</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <h2><span class="num">5</span> 書類を選んで作成・印刷</h2>
+    <div class="doc-choice" id="docChoice"></div>
+
+    <div class="checklist" id="checklistBlock" style="display:none">
+      <strong>案内チェックリスト</strong>(自賠責保険は保険会社ごとに書式が異なり、このシステムでは書類を作成しません)
+      <label><input type="checkbox" id="check_jibaiseki" /> 自賠責保険の名義変更を保険会社の窓口で行うようお客様にご案内した</label>
+      <label><input type="checkbox" id="check_shako" /> 住所変更がある場合、車庫証明の再取得が必要な旨をご案内した</label>
+    </div>
+
+    <button onclick="generateSelected()">選択した書類を作成する</button>
+    <div id="previewArea"></div>
+  </div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
+<script src="./js/procedures.js"></script>
+<script src="./js/shakensho.js"></script>
+<script src="./js/pdf_fields.js"></script>
+<script src="./js/ocr.js"></script>
+<script src="./js/pdfgen.js"></script>
+<script src="./js/app.js"></script>
+</body>
+</html>
