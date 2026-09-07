@@ -359,13 +359,21 @@ function renderResultBlock(label, blob) {
   block.innerHTML =
     "<h4>" + label + "</h4>" +
     '<iframe id="' + frameId + '" src="' + url + '"></iframe>' +
-    '<p><button onclick="printPdf(\'' + frameId + "')\">この内容で印刷する</button></p>";
+    '<p><button onclick="openPdfForPrint(\'' + url + "')\">この書類を開いて印刷する</button></p>" +
+    '<p class="privacy-note">開いた画面右上のアイコン(印刷または共有)から印刷してください。</p>';
   container.appendChild(block);
 }
 
-function printPdf(frameId) {
-  const frame = document.getElementById(frameId);
-  if (frame) frame.contentWindow.print();
+function openPdfForPrint(url) {
+  // ページに埋め込んだiframeからの印刷(iframe.contentWindow.print())は、
+  // スマホのChromeでは正しく動作しないことがある(既知の制約)。そのため、
+  // PDFをブラウザの新しいタブで開き、Chrome純正のPDFビューアの印刷ボタンを
+  // 使ってもらう方式にしている。ユーザー操作(クリック)から直接呼ぶことで
+  // ポップアップブロックを回避している。
+  const win = window.open(url, "_blank");
+  if (!win) {
+    setStatus("新しいタブを開けませんでした。ポップアップブロックの設定をご確認ください。", "error");
+  }
 }
 
 async function generateOne(cfg, label) {
