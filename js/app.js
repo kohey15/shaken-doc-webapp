@@ -14,6 +14,17 @@ const DOC_CONFIG = {
   "juryozei-nofusho": { build: buildJuryozeiPayload, fill: PdfGen.fillJuryozeiNofusho },
 };
 
+// 実機での不具合調査用: DevToolsを繋がなくても画面上でエラー内容が分かるよう、
+// 捕捉されなかったエラー・Promiseの拒否をすべて#statusに表示する。
+window.addEventListener("error", (e) => {
+  setStatus("エラー: " + e.message + " (" + (e.filename || "").split("/").pop() + ":" + e.lineno + ")", "error");
+});
+window.addEventListener("unhandledrejection", (e) => {
+  const reason = e.reason;
+  const msg = reason && reason.message ? reason.message : String(reason);
+  setStatus("エラー(未処理): " + msg, "error");
+});
+
 function setStatus(msg, kind) {
   const el = document.getElementById("status");
   el.innerText = msg || "";
@@ -365,21 +376,22 @@ async function generateOne(cfg, label) {
 }
 
 async function generateSelected() {
-  if (!currentProcedure) {
-    setStatus("手続きの種類を選択してください。", "error");
-    return;
-  }
-  const checked = currentProcedure.documents.filter((d) => document.getElementById("doc_" + d.id).checked);
-  if (checked.length === 0) {
-    setStatus("作成する書類を1つ以上選んでください。", "error");
-    return;
-  }
-  document.getElementById("previewArea").innerHTML = "";
-  generatedBlobUrls.forEach((u) => URL.revokeObjectURL(u));
-  generatedBlobUrls = [];
-  setStatus("PDF生成中...");
   try {
+    if (!currentProcedure) {
+      setStatus("手続きの種類を選択してください。", "error");
+      return;
+    }
+    const checked = currentProcedure.documents.filter((d) => document.getElementById("doc_" + d.id).checked);
+    if (checked.length === 0) {
+      setStatus("作成する書類を1つ以上選んでください。", "error");
+      return;
+    }
+    document.getElementById("previewArea").innerHTML = "";
+    generatedBlobUrls.forEach((u) => URL.revokeObjectURL(u));
+    generatedBlobUrls = [];
+    setStatus("PDF生成中...(" + checked.length + "件)");
     for (const doc of checked) {
+      setStatus("PDF生成中...(" + doc.label + ")");
       await generateOne(DOC_CONFIG[doc.id], doc.label);
     }
     document.getElementById("previewArea").insertAdjacentHTML(
@@ -389,7 +401,7 @@ async function generateSelected() {
     );
     setStatus("生成完了。内容を確認して印刷してください。", "ok");
   } catch (e) {
-    setStatus("PDF生成に失敗: " + e.message, "error");
+    setStatus("PDF生成に失敗: " + e.message + (e.stack ? " [" + e.stack.split("\n")[1] + "]" : ""), "error");
   }
 }
 
