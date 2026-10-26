@@ -2,8 +2,7 @@
 // app/ocr.py (Pythonサーバー版、Tesseract)からロジックを移植し、Tesseract.js(ブラウザ内WASM実行)
 // に置き換えたもの。個人情報は一切サーバーに送らず、すべて端末内で処理する。
 //
-// 簡略化した点: サーバー版は複数のPSM(ページ分割モード)を試して信頼度の高い方を採用していたが、
-// モバイル端末での実行時間を考慮し、書類(住民票・印鑑証明書)に適した単一のPSMに絞っている。
+// 提示された印鑑証明書式では罫線を検出し、縦書きラベルと印影を除いて個別認識する。
 
 const UPSCALE_TARGET_LONG_SIDE = 2200;
 
@@ -19,8 +18,6 @@ function normalizeCircledDigits(text) {
   return text.replace(/[⓪①-⑳㉑-㉟㊱-㊿]/g, (ch) => CIRCLED_DIGIT_MAP[ch] || ch);
 }
 
-const DATE_RE = /(?:明治|大正|昭和|平成|令和)(?:元|\d{1,2})年\s?\d{1,2}月\s?\d{1,2}日|(?:19|20)\d{2}[年./-]\s?\d{1,2}[月./-]\s?\d{1,2}/;
-const FURIGANA_ONLY_RE = /^[ァ-ヶーA-Za-z0-9]+$/;
 const MY_NUMBER_LABEL_RE = /個人番号|マイナンバー/;
 const MY_NUMBER_VALUE_RE = /\d[\d\s-]{10,15}\d/g;
 
@@ -35,50 +32,29 @@ function redactMyNumber(text) {
   return lines.join("\n");
 }
 
-function firstNonFuriganaLine(lines, start) {
-  for (const j of [start, start + 1]) {
-    if (j < lines.length && lines[j] && !FURIGANA_ONLY_RE.test(lines[j])) return lines[j];
-  }
-  return "";
+function extractPersonFields(rawText) {
+  return extractLabeledPersonFields(rawText);
 }
 
-function extractPersonFields(rawText) {
-  const rawLines = rawText.split("\n").map((l) => l.trim()).filter(Boolean);
-  const lines = rawLines.map((l) => l.replace(/\s+/g, ""));
-  const result = { shimei: "", jusho: "", seinengappi: "" };
-
+// 住所・氏名ラベルの右側（同じOCR行）だけを抽出する。
+function extractLabeledPersonFields(rawText) {
+  const lines = rawText.split(/\r?\n/).map((line) => line
+    .replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+    .replace(/\s+/g, "")).filter(Boolean);
+  const result = { shimei: "", jusho: "" };
+  const labels = /ふりがな|フリガナ|氏名|生年月日|住所|従前|前住所|旧住所|本籍|筆頭者|世帯主|続柄|性別|男女の別|個人番号|住民票コード|登録番号|交付|発行|この写し|以上/;
+  const names = lines.filter((line) => /^(?:氏名|名前)/.test(line));
+  // 世帯票は対象者を特定できないため、自動入力を控える。
+  if (names.length > 1) return result;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!result.seinengappi && line.includes("生年月日")) {
-      const after = line.split("生年月日")[1] || "";
-      let m = after.match(DATE_RE);
-      if (!m && i + 1 < lines.length) m = lines[i + 1].match(DATE_RE);
-      if (m) result.seinengappi = m[0];
-    }
-    if (!result.jusho && line.includes("住所")) {
-      const after = (line.split("住所")[1] || "").replace(/^[： :]+/, "");
-      result.jusho = after || firstNonFuriganaLine(lines, i + 1);
-    }
-    if (!result.shimei && line.includes("氏名")) {
-      const after = (line.split("氏名")[1] || "").replace(/^[： :]+/, "");
-      if (after && !FURIGANA_ONLY_RE.test(after)) {
-        result.shimei = after;
-      } else {
-        result.shimei = firstNonFuriganaLine(lines, i + 1);
-      }
-    }
+    const match = lines[i].match(/^(氏名|現住所|住所)[：:]?(.*)$/);
+    if (!match) continue;
+    const key = match[1] === "氏名" ? "shimei" : "jusho";
+    if (result[key]) continue;
+    let value = match[2];
+    value = value.split(labels)[0].replace(/^[：:]+/, "");
+    result[key] = value;
   }
-
-  if (!result.seinengappi) {
-    for (const line of lines.slice(0, 4)) {
-      const m = line.match(DATE_RE);
-      if (m) {
-        result.seinengappi = m[0];
-        break;
-      }
-    }
-  }
-
   return result;
 }
 
@@ -126,9 +102,104 @@ function getWorker() {
   return workerPromise;
 }
 
-async function runOcr(imageBitmap) {
+// 縮小したグレー画像上の水平線から、添付書式の外枠と2本の内罫線を探す。
+// 座標の固定切り抜きはしない。書式・傾きが一致しない場合はnullを返す。
+function detectSealFields(gray, width, height) {
+  const lines = [];
+  for (let y = 0; y < height; y++) {
+    let start = -1, last = -1;
+    for (let x = 0; x <= width + 2; x++) {
+      if (x < width && gray[y * width + x] < 180) {
+        if (start < 0) start = x;
+        last = x;
+      } else if (start >= 0 && x - last > 2) {
+        if (last - start > width * 0.35) lines.push({ x: start, end: last, y });
+        start = -1;
+      }
+    }
+  }
+  const candidates = [];
+  const tolerance = Math.max(3, width * 0.012);
+  for (const top of lines) {
+    const span = top.end - top.x;
+    if (span < width * 0.45) continue;
+    for (const bottom of lines) {
+      const h = bottom.y - top.y;
+      if (h < span * 0.22 || h > span * 0.65 ||
+          Math.abs(bottom.x - top.x) > tolerance || Math.abs(bottom.end - top.end) > tolerance) continue;
+      const inner = lines.filter((line) => line.y > top.y + h * 0.22 && line.y < top.y + h * 0.78 &&
+        Math.abs(line.end - top.end) < tolerance &&
+        line.x > top.x + span * 0.18 && line.x < top.x + span * 0.35);
+      const rows = [];
+      for (const line of inner) {
+        if (!rows.length || line.y - rows[rows.length - 1].y > 3) rows.push(line);
+      }
+      if (rows.length !== 2 || rows[1].y - rows[0].y < h * 0.1) continue;
+      // 値の左罫線は、外枠の約3割の位置。縦書きラベル列の右端を実測する。
+      let valueX = -1;
+      for (let x = Math.ceil(top.x + span * 0.28); x < top.x + span * 0.42; x++) {
+        let count = 0;
+        for (let y = top.y + 2; y < bottom.y - 2; y++) {
+          if (gray[y * width + x] < 180) count++;
+        }
+        if (count > h * 0.8) valueX = x;
+      }
+      if (valueX < 0) continue;
+      const inset = Math.max(3, span * 0.012);
+      candidates.push({
+        shimei: { x: valueX + inset, y: top.y + inset,
+          width: top.end - valueX - inset * 2, height: rows[0].y - top.y - inset * 2 },
+        jusho: { x: valueX + inset, y: rows[1].y + inset,
+          width: top.end - valueX - inset * 2, height: bottom.y - rows[1].y - inset * 2 },
+        area: span * h,
+      });
+    }
+  }
+  return candidates.sort((a, b) => b.area - a.area)[0] || null;
+}
+
+function findSealRegions(canvas) {
+  const small = document.createElement("canvas");
+  const scale = Math.min(1, 900 / canvas.width);
+  small.width = Math.round(canvas.width * scale);
+  small.height = Math.round(canvas.height * scale);
+  const ctx = small.getContext("2d");
+  ctx.drawImage(canvas, 0, 0, small.width, small.height);
+  const pixels = ctx.getImageData(0, 0, small.width, small.height).data;
+  const gray = new Uint8Array(small.width * small.height);
+  for (let i = 0; i < gray.length; i++) gray[i] = pixels[i * 4];
+  const regions = detectSealFields(gray, small.width, small.height);
+  if (!regions) return null;
+  const result = {};
+  for (const key of ["shimei", "jusho"]) {
+    const r = regions[key];
+    const crop = document.createElement("canvas");
+    crop.width = Math.round(r.width / scale) + 32;
+    crop.height = Math.round(r.height / scale) + 32;
+    const out = crop.getContext("2d");
+    out.fillStyle = "white";
+    out.fillRect(0, 0, crop.width, crop.height);
+    out.drawImage(canvas, r.x / scale, r.y / scale, r.width / scale, r.height / scale,
+      16, 16, crop.width - 32, crop.height - 32);
+    result[key] = crop;
+  }
+  return result;
+}
+
+async function recognizePerson(imageBitmap) {
   const canvas = preprocessToCanvas(imageBitmap);
   const worker = await getWorker();
+  const regions = findSealRegions(canvas);
+  if (regions) {
+    const values = {};
+    for (const key of ["shimei", "jusho"]) {
+      // 住所は複数行を許可。氏名も空白を含めた1つの文字列として認識。
+      await worker.setParameters({ tessedit_pageseg_mode: key === "shimei" ? "7" : "6" });
+      const { data } = await worker.recognize(regions[key]);
+      values[key] = normalizeCircledDigits(data.text || "").replace(/\s+/g, "");
+    }
+    return "氏名 " + values.shimei + "\n住所 " + values.jusho;
+  }
   await worker.setParameters({ tessedit_pageseg_mode: "6" });
   const { data } = await worker.recognize(canvas);
   let text = normalizeCircledDigits(data.text || "");
@@ -136,4 +207,15 @@ async function runOcr(imageBitmap) {
   return text;
 }
 
+// 複数のカメラ欄から同時に呼ばれても、共有workerの設定が混ざらないよう直列化する。
+let ocrQueue = Promise.resolve();
+function runOcr(imageBitmap) {
+  const pending = ocrQueue.then(() => recognizePerson(imageBitmap));
+  ocrQueue = pending.catch(() => {});
+  return pending;
+}
+
 window.Ocr = { runOcr, extractPersonFields };
+
+
+
