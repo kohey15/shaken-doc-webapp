@@ -3,7 +3,8 @@
 // バックエンドサーバーが存在しない前提のため、共有されたファイルは
 // サーバーに送らずCache Storage APIに一時保存し、ページ読み込み時に取り出す。
 
-const APP_SHELL_CACHE = "app-shell-v2";
+const APP_SHELL_CACHE = "app-shell-v11-file-import";
+const OCR_ASSET_CACHE = "ocr-assets-v5";
 const SHARE_CACHE = "shakensho-share-v1";
 const SHARED_KEY = "/__shared-shakensho__";
 
@@ -17,7 +18,11 @@ const NETWORK_FIRST_FILES = [
   "./manifest.json",
   "./js/procedures.js",
   "./js/shakensho.js",
+  "./js/weight-tax.js",
   "./js/ocr.js",
+  "./js/shako.js",
+  "./js/police-jurisdictions.js",
+  "./js/massho.js",
   "./js/pdfgen.js",
   "./js/pdf_fields.js",
   "./js/app.js",
@@ -32,6 +37,9 @@ const CACHE_FIRST_FILES = [
   "./templates/keizoku_kensa_3_normalized.pdf",
   "./templates/iten_touroku_1_normalized.pdf",
   "./templates/ininjo.pdf",
+  "./templates/shako_nagano.pdf",
+  "./templates/massho_3_2_normalized.pdf",
+  "./templates/touroku_tesuryo.pdf",
   "./templates/juryozei_nofusho_1.pdf",
 ];
 
@@ -46,7 +54,7 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== APP_SHELL_CACHE && k !== SHARE_CACHE).map((k) => caches.delete(k)))
+      Promise.all(keys.filter((k) => k !== APP_SHELL_CACHE && k !== SHARE_CACHE && k !== OCR_ASSET_CACHE).map((k) => caches.delete(k)))
     ).then(() => self.clients.claim())
   );
 });
@@ -100,12 +108,16 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  const isOcrAsset = url.pathname.startsWith(new URL("./assets/ocr/v5/", self.location).pathname);
   event.respondWith(
-    caches.match(event.request).then((cached) => {
+    caches.open(isOcrAsset ? OCR_ASSET_CACHE : APP_SHELL_CACHE).then(async (cache) => {
+      const cached = await cache.match(event.request);
+      // モデル・WASMなどの大きな固定資産は、キャッシュがあれば再取得しない。
+      if (cached) return cached;
       const network = fetch(event.request)
-        .then((response) => {
+        .then(async (response) => {
           if (response && response.ok) {
-            caches.open(APP_SHELL_CACHE).then((cache) => cache.put(event.request, response.clone()));
+            try { await cache.put(event.request, response.clone()); } catch { /* Return the online response when caching is unavailable. */ }
           }
           return response;
         })

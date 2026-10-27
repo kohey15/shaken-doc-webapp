@@ -3,6 +3,13 @@
 
 const PROCEDURES = [
   {
+    key: "shako", label: "車庫証明申請書（長野県・普通車）", status: "active",
+    needs_shakensho: true, gyomu_shubetsu: null,
+    documents: [{ id: "shako-nagano", label: "自動車保管場所証明申請書（2枚組）" }],
+    roles: [{ key: "shako_applicant", label: "申請者", source: "ocr" }],
+    show_checklist: false,
+  },
+  {
     key: "keizoku",
     label: "継続車検",
     status: "active",
@@ -60,12 +67,16 @@ const PROCEDURES = [
   },
   {
     key: "massho",
-    label: "抹消登録",
-    status: "coming_soon",
-    needs_shakensho: false,
+    label: "一時抹消登録（普通車）",
+    status: "active",
+    needs_shakensho: true,
     gyomu_shubetsu: null,
-    documents: [],
-    roles: [],
+    documents: [
+      { id: "massho-application", label: "一時抹消登録申請書（第3号様式の2）" },
+      { id: "massho-fee", label: "手数料納付書" },
+      { id: "massho-ininjo", label: "委任状（代理申請の場合）", defaultChecked: false },
+    ],
+    roles: [{ key: "massho_owner", label: "所有者", source: "shakensho_owner" }],
     show_checklist: false,
   },
 ];

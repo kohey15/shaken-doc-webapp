@@ -9,6 +9,17 @@ const SAME_AS_USER_SENTINEL_KEI_ADDRESS = "使用者住所に同じ";
 
 const NORMALIZE_KEY_MAP = {
   shatai_bangou: ["CarNo"],
+  shamei: ["CarName"],
+  katashiki: ["Model"],
+  length_cm: ["Length"],
+  width_cm: ["Width"],
+  height_cm: ["Height"],
+  registration_type: ["RegistCarLightCar"],
+  vehicle_use: ["Use"], private_business: ["PrivateBusiness"],
+  weight_kg: ["CarWgt"], weight_note: ["NoteCarWgt"], fuel: ["FuelClass"], tax_notes: ["NoteInfo"],
+  first_era: ["FirstregistdateE"], first_year: ["FirstregistdateY"], first_month: ["FirstregistdateM"],
+  grant_era: ["GrantdateE"], grant_year: ["GrantdateY"], grant_month: ["GrantdateM"], grant_day: ["GrantdateD"],
+  expiry_era: ["ValidPeriodExpirdateE"], expiry_year: ["ValidPeriodExpirdateY"], expiry_month: ["ValidPeriodExpirdateM"], expiry_day: ["ValidPeriodExpirdateD"],
   touroku_bangou_zenbun: ["EntryNoCarNo"],
   touroku_bangou_qr_fixed: ["TwodimensionCodeInfoEntryNoCarNo"],
   shoyusha_shimei: ["OwnernameHighLevelChar", "OwnernameLowLevelChar"],
@@ -64,6 +75,9 @@ function normalizeShakensho(raw) {
   }
 
   const era = result.yukokigen_era;
+  const baseAddress=getAddress(certInfo,"Useheadqrter","UseheadqrterChar","UseheadqrterNumValue");
+  result.use_base_address=baseAddress===SAME_AS_OWNER_SENTINEL_TOUROKUSHA || baseAddress==="使用者住所に同じ"
+    ? result.shiyousha_jusho : baseAddress;
   const year = result.yukokigen_year;
   const month = result.yukokigen_month;
   const day = result.yukokigen_day;
@@ -73,8 +87,22 @@ function normalizeShakensho(raw) {
   delete result.yukokigen_day;
   result.yukokigen = era && year && month && day ? `${era}${year}年${month}月${day}日` : null;
   result.is_kei_jidosha = isKei;
+  result.tax_notes_present = Object.prototype.hasOwnProperty.call(certInfo,'NoteInfo') && typeof certInfo.NoteInfo==='string';
 
   return result;
+}
+
+// ファイルの拡張子やMIMEではなく中身を検査し、無関係なJSONで入力を消さない。
+function parseShakenshoJson(text) {
+  let raw;
+  try { raw = JSON.parse(text.replace(/^\uFEFF/, "")); }
+  catch (_) { throw new Error("JSONを読み取れません。車検証閲覧アプリからJSON形式で保存し直してください。"); }
+  const info = raw && Object.prototype.hasOwnProperty.call(raw, "CertInfo") ? raw.CertInfo : raw;
+  if (!info || typeof info !== "object" || Array.isArray(info) ||
+      typeof info.CarNo !== "string" || !info.CarNo.trim()) {
+    throw new Error("車検証データを確認できません。車検証閲覧アプリで保存したJSONファイルを選択してください。");
+  }
+  return normalizeShakensho(raw);
 }
 
 function flattenKeyPaths(obj, prefix = "") {
@@ -129,4 +157,4 @@ function splitRegistrationNumber(zenbun, qrFixed) {
   return { jimusho: null, bunrui: null, kana: null, ichirenban: zenbun };
 }
 
-window.Shakensho = { normalizeShakensho, flattenKeyPaths, splitRegistrationNumber };
+window.Shakensho = { normalizeShakensho, parseShakenshoJson, flattenKeyPaths, splitRegistrationNumber };

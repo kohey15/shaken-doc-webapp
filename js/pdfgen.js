@@ -51,7 +51,7 @@ function drawLineText(page, pos, text, fontsize, font, maxWidth, pageHeight) {
   page.drawText(text, { x, y, size, font, color: rgb(0, 0, 0) });
 }
 
-async function fillDocument(templateUrl, gridFields, lineFields, data) {
+async function fillDocument(templateUrl, gridFields, lineFields, data, decorate = null) {
   const [templateBytes, fontBytes] = await Promise.all([
     fetch(templateUrl).then((r) => r.arrayBuffer()),
     getFontBytes(),
@@ -71,6 +71,7 @@ async function fillDocument(templateUrl, gridFields, lineFields, data) {
     if (value) drawLineText(page, cfg.pos, String(value), cfg.fontsize, font, cfg.max_width, pageHeight);
   }
 
+  if(decorate)await decorate(pdfDoc,page,font);
   return pdfDoc.save();
 }
 
@@ -83,11 +84,32 @@ async function fillItenTouroku(data) {
 }
 
 async function fillJuryozeiNofusho(data) {
-  return fillDocument("./templates/juryozei_nofusho_1.pdf", PdfFields.JURYOZEI_GRID_FIELDS, PdfFields.JURYOZEI_LINE_FIELDS, data);
+  return fillDocument("./templates/juryozei_nofusho_1.pdf", PdfFields.JURYOZEI_GRID_FIELDS, PdfFields.JURYOZEI_LINE_FIELDS, data,async(doc,page,japaneseFont)=>{
+    const font=await doc.embedFont('Helvetica'),h=page.getHeight();
+    // 新規欄の追加。既存の較正座標は変更しない。数値はASCIIフォントで欠落を防ぐ。
+    if(Number.isInteger(data.juryozei_amount) && data.juryozei_amount>=0){
+      const text=String(data.juryozei_amount),size=12;
+      page.drawText(text,{x:765-font.widthOfTextAtSize(text,size),y:h-185,size,font,color:rgb(0,0,0)});
+    }
+    if(Number.isInteger(data.juryozei_weight_kg) && data.juryozei_weight_kg>0){
+      const text=String(data.juryozei_weight_kg),size=11;
+      page.drawText(text,{x:477-font.widthOfTextAtSize(text,size),y:h-215,size,font,color:rgb(0,0,0)});
+    }
+    if(data.juryozei_exempt)page.drawText('免税',{x:65,y:h-340,size:11,font:japaneseFont,color:rgb(0,0,0)});
+  });
 }
 
 async function fillIninjo(data) {
   return fillDocument("./templates/ininjo.pdf", {}, PdfFields.ININJO_LINE_FIELDS, data);
 }
 
-window.PdfGen = { fillKeizokuKensa, fillItenTouroku, fillJuryozeiNofusho, fillIninjo };
+async function fillShako(data) {
+  return Shako.fillPdf(data, { PDFDocument, rgb, fontkit, getFontBytes });
+}
+function fillMassho(kind,data) {
+  return Massho.fillPdf(kind,data,{ PDFDocument,rgb,fontkit,getFontBytes,ininjoFields:PdfFields.ININJO_LINE_FIELDS });
+}
+const fillMasshoApplication=data=>fillMassho('application',data);
+const fillMasshoFee=data=>fillMassho('fee',data);
+const fillMasshoIninjo=data=>fillMassho('delegation',data);
+window.PdfGen = { fillKeizokuKensa, fillItenTouroku, fillJuryozeiNofusho, fillIninjo, fillShako, fillMasshoApplication, fillMasshoFee, fillMasshoIninjo };

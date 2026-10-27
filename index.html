@@ -39,7 +39,7 @@
   .step h3 { font-size: 14px; margin: 16px 0 8px; color: var(--primary-dark); }
 
   label { display: block; margin-top: 10px; font-size: 13.5px; color: #444; font-weight: 500; }
-  input[type=text] {
+  input[type=text], input[type=date], select {
     width: 100%; padding: 11px 10px; font-size: 16px; margin-top: 3px;
     border: 1px solid #bcc7d6; border-radius: 6px; background: #fbfcfe;
   }
@@ -83,6 +83,7 @@
   .camera-area canvas { display: none; }
   .doc-type-choice { display: flex; gap: 10px; margin: 10px 0; }
   .doc-type-choice label { flex: 1; text-align: center; }
+  .identity-role + .identity-role { border-top: 1px solid var(--border); margin-top: 20px; padding-top: 4px; }
 </style>
 </head>
 <body>
@@ -100,16 +101,19 @@
   <div class="step" id="stepShakensho">
     <h2><span class="num">2</span> 車検証の読み込み</h2>
     <p id="shakenshoStatus" class="waiting">
-      スマートフォンの「車検証閲覧アプリ」で車検証を読み取り、共有一覧から
-      「車検書類作成」を選んでください。選ぶとこの画面に自動的に反映されます。
+      車検証閲覧アプリで保存したJSONファイルを、下のボタンから取り込んでください。
+      Androidでは、共有一覧の「車検書類作成」からも取り込めます。
     </p>
+    <label for="shakenshoFile">車検証データをファイルから取り込む（JSON）</label>
+    <input type="file" id="shakenshoFile" accept=".json,application/json" onchange="importShakenshoFile(this)" aria-describedby="shakenshoFileHelp shakenshoFileStatus" />
+    <p class="privacy-note" id="shakenshoFileHelp">iPhone：車検証閲覧アプリで「車検証情報読み込みファイルを保存」からJSON形式を選び、「“ファイル”に保存」した後、ここで選択してください。PDF・XML・CSV・写真には対応していません。</p>
+    <p id="shakenshoFileStatus" class="privacy-note" role="status" aria-live="polite"></p>
     <p class="privacy-note">※車検証データはこの端末の中だけで処理され、外部やサーバーには一切送信されません。</p>
   </div>
 
   <div class="step" id="stepOcr">
-    <h2><span class="num">3</span> 住民票・印鑑証明書の読み取り</h2>
-    <div id="ocrBlocksContainer"></div>
-    <p class="privacy-note">※撮影した画像はこの端末の中だけで処理され、文字を読み取った時点で破棄されます(保存されません)。</p>
+    <h2><span class="num">3</span> 氏名、住所記入欄</h2>
+    <div id="roleFieldsContainer"></div>
   </div>
 
   <div class="step">
@@ -117,8 +121,15 @@
 
     <h3>車両情報</h3>
     <label>車台番号</label>
-    <input type="text" id="shatai_bangou" />
-    <div>
+    <input type="text" id="shatai_bangou" oninput="updateWeightTax()" />
+    <div id="shakoVehicleFields" style="display:none">
+      <label>車名（メーカー名）<input type="text" id="shako_maker" data-shako placeholder="例：トヨタ" /></label>
+      <label>型式<input type="text" id="shako_model" data-shako placeholder="例：6BA-MXPA10" /></label>
+      <label>長さ（cm）<input type="text" id="shako_length" data-shako inputmode="numeric" maxlength="4" /></label>
+      <label>幅（cm）<input type="text" id="shako_width" data-shako inputmode="numeric" maxlength="3" /></label>
+      <label>高さ（cm）<input type="text" id="shako_height" data-shako inputmode="numeric" maxlength="3" /></label>
+    </div>
+    <div id="registrationFields">
       <label>自動車登録番号: 運輸支局名</label>
       <input type="text" id="touroku_jimusho" maxlength="4" />
       <label>分類番号(3桁)</label>
@@ -133,30 +144,72 @@
       <input type="text" id="gyomu_shubetsu" value="1" maxlength="1" />
     </div>
 
-    <h3>当事者情報</h3>
-    <div id="roleFieldsContainer"></div>
+    <div id="shakoDetails" style="display:none">
+      <h3>車庫証明申請書の追加情報</h3>
+      <p class="privacy-note">長野県・普通車の申請書2枚を作成します。<a href="https://www.pref.nagano.lg.jp/police/shinsei/koutsu/shakoshomei.html" target="_blank" rel="noopener">公式様式・記載例</a></p>
+      <label>提出先の警察署（「警察署」を除く）<input type="text" id="shako_police" data-shako placeholder="例：伊那" oninput="markPoliceManual()" aria-describedby="shakoPoliceStatus" /></label>
+      <p id="shakoPoliceStatus" class="privacy-note" role="status" aria-live="polite"></p>
+      <button type="button" class="secondary" onclick="updateShakoPolice()">保管場所の住所から再判定</button>
+      <p class="privacy-note">保管場所（駐車場）の住所から自動入力します。住所を変更すると再判定します。市内で管轄が分かれる場合は手入力してください。<a href="https://www.pref.nagano.lg.jp/police/keisatsusho/" target="_blank" rel="noopener">長野県警の管轄一覧</a>（2026年10月27日確認）</p>
+      <label>申請者の郵便番号（任意）<input type="text" id="shako_zip" data-shako inputmode="numeric" placeholder="例：396-0001" /></label>
+      <label>申請者の電話番号<input type="text" id="shako_phone" data-shako inputmode="tel" /></label>
+      <label>自動車の使用の本拠の位置<input type="text" id="shako_base_address" data-shako /></label>
+      <button class="secondary" onclick="document.getElementById('shako_base_address').value=getRoleValue('shako_applicant','jusho')">申請者住所を使用の本拠にコピー</button>
+      <label>自動車の保管場所の位置<input type="text" id="shako_garage_address" data-shako placeholder="駐車場名・区画番号も入力できます" oninput="updateShakoPolice()" /></label>
+      <button type="button" class="secondary" onclick="copyApplicantAddressToGarage()">申請者住所を保管場所にコピー</button>
+      <label>申請日（空欄のまま作成可能）<input type="date" id="shako_date" data-shako /></label>
+      <label>使用権原（任意）<select id="shako_rights" data-shako><option value="">未記入</option><option value="own">自己</option><option value="other">他人</option><option value="joint">共有</option></select></label>
+      <label>新規・代替（任意）<select id="shako_purpose" data-shako onchange="document.getElementById('shakoReplaceFields').style.display=this.value==='replace'?'':'none'"><option value="">未記入</option><option value="new">新規</option><option value="replace">代替</option></select></label>
+      <div id="shakoReplaceFields" style="display:none">
+        <label>前車の登録番号（任意）<input type="text" id="shako_prior_plate" data-shako /></label>
+        <label>現車の登録番号（任意）<input type="text" id="shako_current_plate" data-shako /></label>
+      </div>
+      <label>連絡先氏名（申請者以外・任意）<input type="text" id="shako_contact_name" data-shako /></label>
+      <label>連絡先電話番号（任意）<input type="text" id="shako_contact_phone" data-shako inputmode="tel" /></label>
+      <p class="privacy-note">自認書・使用承諾証明書・所在図／配置図は今回作成しません。この機能から申請の送信は行いません。</p>
+    </div>
+
+    <div id="masshoDetails" style="display:none">
+      <h3>一時抹消登録の追加情報</h3>
+      <p class="privacy-note">普通車の一時抹消登録に対応します。所有者の氏名・住所を車検証から引き継ぎます。所有者・住所の変更を伴う申請、軽自動車の返納は対象外です。</p>
+      <label>宛先の運輸支局名<input type="text" id="massho_authority" data-massho data-default="長野" value="長野" placeholder="例：長野" /></label>
+      <label>申請方法<select id="massho_method" data-massho data-default="self" onchange="updateMasshoMethod()"><option value="self">本人申請</option><option value="proxy">代理申請</option></select></label>
+      <div id="masshoAgentFields" style="display:none">
+        <label>代理人氏名・名称<input type="text" id="massho_agent_name" data-massho /></label>
+        <label>代理人住所<input type="text" id="massho_agent_address" data-massho /></label>
+      </div>
+      <label>申請日（任意）<input type="date" id="massho_date" data-massho /></label>
+      <label>一時使用中止日（任意）<input type="date" id="massho_cause_date" data-massho /></label>
+      <label>申請者・代理人の連絡先電話番号（任意）<input type="text" id="massho_phone" data-massho inputmode="tel" /></label>
+      <label>登録手数料（円・任意）<input type="text" id="massho_amount" data-massho inputmode="numeric" placeholder="窓口等で確認した金額。空欄でも作成できます" /></label>
+      <p class="privacy-note">申請書はA4横・倍率100%（拡大縮小なし）で印刷してください。<a href="https://wwwtb.mlit.go.jp/hokushin/nagano/touroku/youshiki/youshiki.html" target="_blank" rel="noopener">長野運輸支局の手続き案内・記載例</a></p>
+      <p class="privacy-note">印鑑証明書の原本、車検証、ナンバープレート等は別途ご用意ください。作成後に記入内容と必要書類を確認して提出してください。</p>
+    </div>
 
     <div id="juryozeiBlock" style="display:none">
       <h3>自動車重量税納付書の追加情報</h3>
+      <label>検査予定日（運輸支局等で手続きする日）<input type="date" id="juryozei_inspection_date" onchange="updateWeightTax()" /></label>
+      <p id="weightTaxStatus" class="privacy-note" role="status" aria-live="polite"></p>
+      <p class="privacy-note">車検証情報から確定できる税額と車両重量を印字します。「税額要確認」の場合は納付税額欄を空欄で印刷します。税額を確認して印刷物に手書きしてください。<a href="https://www.nextmvtt.mlit.go.jp/" target="_blank" rel="noopener">国土交通省の公式照会</a></p>
       <label>自動車検査証の有効期間</label>
-      <div class="doc-choice">
+      <div class="doc-choice" onchange="updateWeightTax()">
         <label><input type="radio" name="juryozeiKikan" value="2nen" checked /> 2年</label>
         <label><input type="radio" name="juryozeiKikan" value="3nen" /> 3年</label>
         <label><input type="radio" name="juryozeiKikan" value="1nen" /> 1年</label>
       </div>
       <label>自家用・事業用の別</label>
-      <div class="doc-choice">
+      <div class="doc-choice" onchange="updateWeightTax()">
         <label><input type="radio" name="juryozeiJika" value="jika" checked /> 自家用</label>
         <label><input type="radio" name="juryozeiJika" value="jigyou" /> 事業用</label>
       </div>
       <label>自動車の区分</label>
-      <div class="doc-choice">
+      <div class="doc-choice" onchange="updateWeightTax()">
         <label><input type="radio" name="juryozeiKubun" value="you" checked /> 乗用自動車</label>
         <label><input type="radio" name="juryozeiKubun" value="kamotsu" /> 貨物(総重量2.5t以下)</label>
         <label><input type="radio" name="juryozeiKubun" value="nirin" /> 二輪の小型自動車</label>
         <label><input type="radio" name="juryozeiKubun" value="sonota" /> その他の自動車</label>
       </div>
-      <p class="privacy-note">※納付税額・車両重量の欄は空欄のまま印刷されます(税額表の確認が必要なため)。運輸支局窓口で確認し、手書きで記入してください。</p>
+      <p class="privacy-note">自動判定は継続車検の登録車・自家用乗用車（1年／2年、車両重量3t以下）と、2026年5月1日～2028年4月30日の収録条件が対象です。不明な条件・改造車等は空欄にします。</p>
     </div>
   </div>
 
@@ -178,11 +231,14 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
 <script src="./js/procedures.js"></script>
 <script src="./js/shakensho.js"></script>
+<script src="./js/weight-tax.js"></script>
 <script src="./js/pdf_fields.js"></script>
 <script src="./js/ocr.js"></script>
+<script src="./js/shako.js"></script>
+<script src="./js/police-jurisdictions.js"></script>
+<script src="./js/massho.js"></script>
 <script src="./js/pdfgen.js"></script>
 <script src="./js/app.js"></script>
 </body>

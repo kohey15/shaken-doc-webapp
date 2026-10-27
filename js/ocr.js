@@ -1,221 +1,233 @@
-// 本人確認書類(住民票・印鑑証明書のみ対応)のOCR。
-// app/ocr.py (Pythonサーバー版、Tesseract)からロジックを移植し、Tesseract.js(ブラウザ内WASM実行)
-// に置き換えたもの。個人情報は一切サーバーに送らず、すべて端末内で処理する。
-//
-// 提示された印鑑証明書式では罫線を検出し、縦書きラベルと印影を除いて個別認識する。
+// PP-OCRv5 runs in a local Web Worker. Neither photos nor extracted personal data are uploaded.
+// Model assets are downloaded from this app's own origin and cached by the service worker.
 
-const UPSCALE_TARGET_LONG_SIDE = 2200;
-
-const CIRCLED_DIGIT_MAP = (() => {
-  const map = { "⓪": "0" };
-  for (let i = 1; i <= 20; i++) map[String.fromCodePoint(0x2460 + i - 1)] = String(i);
-  for (let i = 21; i <= 35; i++) map[String.fromCodePoint(0x3251 + i - 21)] = String(i);
-  for (let i = 36; i <= 50; i++) map[String.fromCodePoint(0x32b1 + i - 36)] = String(i);
-  return map;
-})();
-
-function normalizeCircledDigits(text) {
-  return text.replace(/[⓪①-⑳㉑-㉟㊱-㊿]/g, (ch) => CIRCLED_DIGIT_MAP[ch] || ch);
+function normalizeFieldValue(text) {
+  return (text || '').replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+    .replace(/\s+/g, '');
 }
 
-const MY_NUMBER_LABEL_RE = /個人番号|マイナンバー/;
-const MY_NUMBER_VALUE_RE = /\d[\d\s-]{10,15}\d/g;
+function nodeFromItem(item) {
+  if (!item || !Array.isArray(item.poly) || item.poly.length !== 4 || typeof item.text !== 'string') return null;
+  if (!item.poly.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite))) return null;
+  const xs = item.poly.map(p => p[0]), ys = item.poly.map(p => p[1]);
+  const bbox = { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
+  return { ...item, text: normalizeFieldValue(item.text), bbox,
+    cx: xs.reduce((a,b) => a+b, 0) / 4, cy: ys.reduce((a,b) => a+b, 0) / 4,
+    h: Math.max(1, (Math.hypot(xs[0]-xs[3],ys[0]-ys[3]) + Math.hypot(xs[1]-xs[2],ys[1]-ys[2])) / 2) };
+}
 
-function redactMyNumber(text) {
-  const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    if (MY_NUMBER_LABEL_RE.test(lines[i])) {
-      lines[i] = lines[i].replace(MY_NUMBER_VALUE_RE, "[マイナンバー・伏字]");
-      if (i + 1 < lines.length) lines[i + 1] = lines[i + 1].replace(MY_NUMBER_VALUE_RE, "[マイナンバー・伏字]");
+const FIELD_LABEL_RE = /^(?:氏名(?:の振[り]?仮名)?|住所|現住所|転入前住所|従前の住所|旧住所|前住所|本籍|筆頭者|世帯主|世带主|生年月日|性別|性别|続柄|旧氏(?:の振[り]?仮名)?|個人番号|住民票コード|登録番号|交付年月日|発行年月日)(?:$|[：:])/;
+const PLACEHOLDER_RE = /^(?:[【】\[\]＊*]+|[【\[]?(?:以下余白|空欄|余白)[】\]]?)$/;
+
+function isOtherField(node) {
+  return FIELD_LABEL_RE.test(node.text) || /^(?:性別|性别|続柄|個人番号|住民票コード)/.test(node.text);
+}
+
+function splitInlineLabel(node) {
+  // Some layouts produce a single recognized line for both the label and its value.
+  const match = node.text.match(/^(氏名|住所|現住所)[：:]?(.+)$/);
+  if (!match || /^(?:の|を|コード|番号|変更|異動)/.test(match[2])) return [node];
+  const index = match[1].length + (/^[：:]/.test(node.text.slice(match[1].length)) ? 1 : 0);
+  const ratio = index / node.text.length;
+  const [a,b,c,d] = node.poly;
+  const upper = [a[0]+(b[0]-a[0])*ratio, a[1]+(b[1]-a[1])*ratio];
+  const lower = [d[0]+(c[0]-d[0])*ratio, d[1]+(c[1]-d[1])*ratio];
+  return [nodeFromItem({...node,text:match[1],poly:[a,upper,lower,d]}),
+    nodeFromItem({...node,text:match[2],poly:[upper,b,c,lower]})];
+}
+
+function labelAxis(label) {
+  const [a,b] = label.poly;
+  const dx = b[0]-a[0], dy = b[1]-a[1], length = Math.hypot(dx,dy);
+  // A vertically printed label still points to a value to its right.
+  if (!length || Math.abs(dy) > Math.abs(dx)) return {x:1,y:0};
+  const sign = dx < 0 ? -1 : 1;
+  return {x:dx/length*sign,y:dy/length*sign};
+}
+
+function positionFrom(label, node, axis) {
+  const dx=node.cx-label.cx, dy=node.cy-label.cy;
+  return { along:dx*axis.x+dy*axis.y, cross:-dx*axis.y+dy*axis.x };
+}
+
+function geometryFields(items) {
+  const nodes = (items || []).map(nodeFromItem).filter(Boolean).flatMap(splitInlineLabel)
+    .filter(n => !/^(?:住民票(?:の写し)?|印鑑登録証明書|印鑑証明書)$/.test(n.text));
+  const labels = nodes.filter(n => ['氏名','住所','現住所'].includes(n.text));
+  const result = [];
+  for (const label of labels) {
+    const key = label.text === '氏名' ? 'shimei' : 'jusho';
+    const axis = labelAxis(label);
+    const labelHalf = Math.max(1,(label.bbox.x1-label.bbox.x0)/2);
+    const row = nodes.filter(n => n !== label).map(node => ({node,...positionFrom(label,node,axis)}))
+      .filter(p => p.along > labelHalf && p.node.bbox.x1 > label.bbox.x1 &&
+        Math.abs(p.cross) < Math.max(label.h,p.node.h)*0.75)
+      .sort((a,b) => a.along-b.along);
+    const selected = [];
+    for (const item of row) {
+      if (isOtherField(item.node)) break;
+      const previous = selected[selected.length-1];
+      if (previous && item.node.bbox.x0 < previous.bbox.x1-Math.max(previous.h,item.node.h)*0.25) continue;
+      const gap = previous ? item.node.bbox.x0-previous.bbox.x1 : item.node.bbox.x0-label.bbox.x1;
+      if (gap > Math.max(label.h,item.node.h)* (previous ? 3 : 6)) break;
+      selected.push(item.node);
     }
+    if (!selected.length || selected.every(n => PLACEHOLDER_RE.test(n.text))) continue;
+
+    // Join aligned address continuation lines, stopping before any following field's label.
+    if (key === 'jusho') {
+      const startX = selected[0].bbox.x0;
+      // 長い住所行の傾きの方が、短いラベルの傾きより安定する。
+      const continuationAxis = labelAxis(selected.reduce((a,b) =>
+        a.bbox.x1-a.bbox.x0 > b.bbox.x1-b.bbox.x0 ? a : b));
+      for (let count=0; count<5; count++) {
+        const last=selected[selected.length-1];
+        const lastPos=positionFrom(label,last,continuationAxis);
+        const next=nodes.filter(n => !selected.includes(n) && !isOtherField(n) && !PLACEHOLDER_RE.test(n.text))
+          .map(node => ({node,...positionFrom(label,node,continuationAxis)}))
+          .filter(p => p.cross > lastPos.cross + Math.max(last.h,p.node.h)*0.65 &&
+            p.cross < lastPos.cross + Math.max(last.h,p.node.h)*2.3 &&
+            Math.abs(p.node.bbox.x0-startX) < Math.max(last.h,p.node.h)*1.5)
+          .sort((a,b) => a.cross-b.cross)[0];
+        if (!next) break;
+        const separator=nodes.some(n => n !== label &&
+          (isOtherField(n) || n.bbox.x1 < startX-Math.max(last.h,n.h)*0.25) &&
+          n.bbox.x0 < next.node.bbox.x1 &&
+          positionFrom(label,n,continuationAxis).cross > lastPos.cross + last.h*0.4 &&
+          positionFrom(label,n,continuationAxis).cross < next.cross + next.node.h*0.5);
+        if (separator) break;
+        selected.push(next.node);
+      }
+    }
+    const text=selected.filter(n => !PLACEHOLDER_RE.test(n.text)).map(n => n.text).join('');
+    if (!text || PLACEHOLDER_RE.test(text)) continue;
+    result.push({key,text,score:Math.min(label.score ?? 0,...selected.map(n=>n.score ?? 0)),
+      poly:selected.length===1?selected[0].poly:null,
+      bbox:{x0:Math.min(...selected.map(n=>n.bbox.x0)),y0:Math.min(...selected.map(n=>n.bbox.y0)),
+        x1:Math.max(...selected.map(n=>n.bbox.x1)),y1:Math.max(...selected.map(n=>n.bbox.y1))}});
   }
-  return lines.join("\n");
+  return result;
+}
+
+function chooseFields(candidates) {
+  const fields={shimei:'',jusho:''};
+  for (const key of ['shimei','jusho']) {
+    const matches=candidates.filter(c=>c.key===key);
+    if (matches.length===1) fields[key]=matches[0].text;
+  }
+  return fields;
 }
 
 function extractPersonFields(rawText) {
-  return extractLabeledPersonFields(rawText);
-}
-
-// 住所・氏名ラベルの右側（同じOCR行）だけを抽出する。
-function extractLabeledPersonFields(rawText) {
-  const lines = rawText.split(/\r?\n/).map((line) => line
-    .replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
-    .replace(/\s+/g, "")).filter(Boolean);
-  const result = { shimei: "", jusho: "" };
-  const labels = /ふりがな|フリガナ|氏名|生年月日|住所|従前|前住所|旧住所|本籍|筆頭者|世帯主|続柄|性別|男女の別|個人番号|住民票コード|登録番号|交付|発行|この写し|以上/;
-  const names = lines.filter((line) => /^(?:氏名|名前)/.test(line));
-  // 世帯票は対象者を特定できないため、自動入力を控える。
-  if (names.length > 1) return result;
-  for (let i = 0; i < lines.length; i++) {
-    const match = lines[i].match(/^(氏名|現住所|住所)[：:]?(.*)$/);
+  const candidates=[];
+  for (const line of rawText.split(/\r?\n/)) {
+    const match=normalizeFieldValue(line).match(/^(氏名|住所|現住所)[：:]?(.+)$/);
     if (!match) continue;
-    const key = match[1] === "氏名" ? "shimei" : "jusho";
-    if (result[key]) continue;
-    let value = match[2];
-    value = value.split(labels)[0].replace(/^[：:]+/, "");
-    result[key] = value;
+    const text=match[2].split(/生年月日|世帯主|本籍|旧氏|続柄|個人番号/)[0];
+    if (text && !/^(?:の|を)/.test(text)) candidates.push({key:match[1]==='氏名'?'shimei':'jusho',text});
   }
-  return result;
+  return chooseFields(candidates);
 }
 
-function preprocessToCanvas(imageBitmap) {
-  const longSide = Math.max(imageBitmap.width, imageBitmap.height);
-  const scale = longSide < UPSCALE_TARGET_LONG_SIDE ? UPSCALE_TARGET_LONG_SIDE / longSide : 1;
-  const w = Math.round(imageBitmap.width * scale);
-  const h = Math.round(imageBitmap.height * scale);
-
-  const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(imageBitmap, 0, 0, w, h);
-
-  // グレースケール化 + 簡易オートコントラスト(影・逆光による低コントラストの補正)
-  const imgData = ctx.getImageData(0, 0, w, h);
-  const data = imgData.data;
-  let min = 255;
-  let max = 0;
-  const gray = new Uint8ClampedArray(w * h);
-  for (let i = 0; i < data.length; i += 4) {
-    const g = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-    gray[i / 4] = g;
-    if (g < min) min = g;
-    if (g > max) max = g;
-  }
-  const range = Math.max(max - min, 1);
-  for (let i = 0; i < gray.length; i++) {
-    const stretched = ((gray[i] - min) / range) * 255;
-    data[i * 4] = data[i * 4 + 1] = data[i * 4 + 2] = stretched;
-  }
-  ctx.putImageData(imgData, 0, 0);
-  return canvas;
+const OCR_ASSET_CACHE='ocr-assets-v5';
+const OCR_WORKER_VERSION='20261026.1';
+let worker=null, workerStartup=null, workerScriptUrl=null, nextId=0;
+async function cachedAssetResponse(url) {
+  const cache=typeof caches!=='undefined'?await caches.open(OCR_ASSET_CACHE):null;
+  const cached=cache?await cache.match(url):null;
+  if(cached) return cached;
+  const response=await fetch(url);
+  if(cache&&response.ok) {try {await cache.put(url,response.clone());}catch { /* Online recognition still works when storage is full. */ }}
+  return response;
+}
+const pending=new Map();
+function failWorker(message) {
+  if (worker) worker.terminate();
+  worker=null;
+  workerStartup=null;
+  if (workerScriptUrl) URL.revokeObjectURL(workerScriptUrl);
+  workerScriptUrl=null;
+  for (const task of pending.values()) {clearTimeout(task.timer);task.reject(new Error(message));}
+  pending.clear();
+}
+async function getWorker() {
+  if (worker) return worker;
+  if (!workerStartup) workerStartup=(async()=>{
+    const url=new URL('./assets/ocr/v5/worker.js?v='+OCR_WORKER_VERSION,document.baseURI).href;
+    const response=await cachedAssetResponse(url);
+    if (!response.ok) throw new Error('認識プログラムを読み込めませんでした。通信を確認してください。');
+    // A self-contained bundle can boot from its local cache even while offline.
+    const code=(await response.text()).replaceAll('import.meta.url',JSON.stringify(url));
+    workerScriptUrl=URL.createObjectURL(new Blob([code],{type:'text/javascript'}));
+    worker=new Worker(workerScriptUrl,{type:'module'});
+    worker.onmessage=({data})=>{
+      const task=pending.get(data.id);
+      if (!task) return;
+      if (data.type==='progress') {if(task.onProgress) task.onProgress(data.message);return;}
+      clearTimeout(task.timer);pending.delete(data.id);
+      if(data.type==='error') task.reject(new Error('認識データの読み込み、または文字認識に失敗しました。通信を確認して再度お試しください。 ('+data.message+')'));
+      else task.resolve(data.result);
+    };
+    worker.onerror=()=>failWorker('文字認識を起動できませんでした。ブラウザを開き直し、再度お試しください。');
+    return worker;
+  })().catch(error=>{failWorker(error.message);throw error;});
+  return workerStartup;
 }
 
-let workerPromise = null;
-function getWorker() {
-  if (!workerPromise) {
-    workerPromise = Tesseract.createWorker("jpn", 1, {
-      langPath: "./tessdata",
-      gzip: false,
+async function recognize(canvas,onProgress) {
+  if(onProgress) onProgress('認識データを準備しています。初回は通信に時間がかかることがあります。');
+  const target=await getWorker();
+  return new Promise((resolve,reject)=>{
+    const id=++nextId;
+    const timer=setTimeout(()=>failWorker('文字認識に時間がかかりすぎたため停止しました。通信を確認して再度お試しください。'),240000);
+    pending.set(id,{resolve,reject,timer,onProgress});
+    try {
+      const image=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height);
+      target.postMessage({id,width:image.width,height:image.height,buffer:image.data.buffer},[image.data.buffer]);
+    }
+    catch(error) {clearTimeout(timer);pending.delete(id);reject(error);}
+  });
+}
+
+async function recognizeFields(bitmap,onProgress) {
+  const canvas=document.createElement('canvas');
+  const scale=Math.min(1,3200/Math.max(bitmap.width,bitmap.height));
+  canvas.width=Math.round(bitmap.width*scale);canvas.height=Math.round(bitmap.height*scale);
+  canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);
+  try {
+    const result=await recognize(canvas,onProgress);
+    const candidates=geometryFields(result.items).map(candidate=>{
+      const r=candidate.bbox, margin=8;
+      const x=Math.max(0,Math.floor(r.x0)-margin),y=Math.max(0,Math.floor(r.y0)-margin);
+      const w=Math.min(canvas.width-x,Math.ceil(r.x1)-x+margin),h=Math.min(canvas.height-y,Math.ceil(r.y1)-y+margin);
+      const crop=document.createElement('canvas');crop.width=w;crop.height=h;
+      const ctx=crop.getContext('2d');
+      if (candidate.poly) {
+        const [a,b,,d]=candidate.poly;
+        const bx=b[0]-a[0],by=b[1]-a[1],dx=d[0]-a[0],dy=d[1]-a[1];
+        const det=bx*dy-by*dx;
+        if (Math.abs(det)>1) {
+          const pw=Math.hypot(bx,by),ph=Math.hypot(dx,dy);
+          crop.width=Math.ceil(pw)+margin*2;crop.height=Math.ceil(ph)+margin*2;
+          const ta=pw*dy/det,tb=-ph*by/det,tc=-pw*dx/det,td=ph*bx/det;
+          ctx.fillStyle='white';ctx.fillRect(0,0,crop.width,crop.height);
+          ctx.setTransform(ta,tb,tc,td,margin-ta*a[0]-tc*a[1],margin-tb*a[0]-td*a[1]);
+          ctx.drawImage(canvas,0,0);
+        } else ctx.drawImage(canvas,x,y,w,h,0,0,w,h);
+      } else ctx.drawImage(canvas,x,y,w,h,0,0,w,h);
+      return {...candidate,preview:crop.toDataURL('image/png'),clippedRight:r.x1>=canvas.width-4};
     });
-  }
-  return workerPromise;
+    return {fields:chooseFields(candidates),candidates};
+  } finally {canvas.width=canvas.height=0;}
 }
 
-// 縮小したグレー画像上の水平線から、添付書式の外枠と2本の内罫線を探す。
-// 座標の固定切り抜きはしない。書式・傾きが一致しない場合はnullを返す。
-function detectSealFields(gray, width, height) {
-  const lines = [];
-  for (let y = 0; y < height; y++) {
-    let start = -1, last = -1;
-    for (let x = 0; x <= width + 2; x++) {
-      if (x < width && gray[y * width + x] < 180) {
-        if (start < 0) start = x;
-        last = x;
-      } else if (start >= 0 && x - last > 2) {
-        if (last - start > width * 0.35) lines.push({ x: start, end: last, y });
-        start = -1;
-      }
-    }
-  }
-  const candidates = [];
-  const tolerance = Math.max(3, width * 0.012);
-  for (const top of lines) {
-    const span = top.end - top.x;
-    if (span < width * 0.45) continue;
-    for (const bottom of lines) {
-      const h = bottom.y - top.y;
-      if (h < span * 0.22 || h > span * 0.65 ||
-          Math.abs(bottom.x - top.x) > tolerance || Math.abs(bottom.end - top.end) > tolerance) continue;
-      const inner = lines.filter((line) => line.y > top.y + h * 0.22 && line.y < top.y + h * 0.78 &&
-        Math.abs(line.end - top.end) < tolerance &&
-        line.x > top.x + span * 0.18 && line.x < top.x + span * 0.35);
-      const rows = [];
-      for (const line of inner) {
-        if (!rows.length || line.y - rows[rows.length - 1].y > 3) rows.push(line);
-      }
-      if (rows.length !== 2 || rows[1].y - rows[0].y < h * 0.1) continue;
-      // 値の左罫線は、外枠の約3割の位置。縦書きラベル列の右端を実測する。
-      let valueX = -1;
-      for (let x = Math.ceil(top.x + span * 0.28); x < top.x + span * 0.42; x++) {
-        let count = 0;
-        for (let y = top.y + 2; y < bottom.y - 2; y++) {
-          if (gray[y * width + x] < 180) count++;
-        }
-        if (count > h * 0.8) valueX = x;
-      }
-      if (valueX < 0) continue;
-      const inset = Math.max(3, span * 0.012);
-      candidates.push({
-        shimei: { x: valueX + inset, y: top.y + inset,
-          width: top.end - valueX - inset * 2, height: rows[0].y - top.y - inset * 2 },
-        jusho: { x: valueX + inset, y: rows[1].y + inset,
-          width: top.end - valueX - inset * 2, height: bottom.y - rows[1].y - inset * 2 },
-        area: span * h,
-      });
-    }
-  }
-  return candidates.sort((a, b) => b.area - a.area)[0] || null;
+let ocrQueue=Promise.resolve();
+function readFields(bitmap,onProgress) {
+  const task=ocrQueue.then(()=>recognizeFields(bitmap,onProgress));
+  ocrQueue=task.catch(()=>{});
+  return task;
 }
-
-function findSealRegions(canvas) {
-  const small = document.createElement("canvas");
-  const scale = Math.min(1, 900 / canvas.width);
-  small.width = Math.round(canvas.width * scale);
-  small.height = Math.round(canvas.height * scale);
-  const ctx = small.getContext("2d");
-  ctx.drawImage(canvas, 0, 0, small.width, small.height);
-  const pixels = ctx.getImageData(0, 0, small.width, small.height).data;
-  const gray = new Uint8Array(small.width * small.height);
-  for (let i = 0; i < gray.length; i++) gray[i] = pixels[i * 4];
-  const regions = detectSealFields(gray, small.width, small.height);
-  if (!regions) return null;
-  const result = {};
-  for (const key of ["shimei", "jusho"]) {
-    const r = regions[key];
-    const crop = document.createElement("canvas");
-    crop.width = Math.round(r.width / scale) + 32;
-    crop.height = Math.round(r.height / scale) + 32;
-    const out = crop.getContext("2d");
-    out.fillStyle = "white";
-    out.fillRect(0, 0, crop.width, crop.height);
-    out.drawImage(canvas, r.x / scale, r.y / scale, r.width / scale, r.height / scale,
-      16, 16, crop.width - 32, crop.height - 32);
-    result[key] = crop;
-  }
-  return result;
+function runOcr(bitmap) {
+  return readFields(bitmap).then(({fields})=>'氏名 '+fields.shimei+'\n住所 '+fields.jusho);
 }
-
-async function recognizePerson(imageBitmap) {
-  const canvas = preprocessToCanvas(imageBitmap);
-  const worker = await getWorker();
-  const regions = findSealRegions(canvas);
-  if (regions) {
-    const values = {};
-    for (const key of ["shimei", "jusho"]) {
-      // 住所は複数行を許可。氏名も空白を含めた1つの文字列として認識。
-      await worker.setParameters({ tessedit_pageseg_mode: key === "shimei" ? "7" : "6" });
-      const { data } = await worker.recognize(regions[key]);
-      values[key] = normalizeCircledDigits(data.text || "").replace(/\s+/g, "");
-    }
-    return "氏名 " + values.shimei + "\n住所 " + values.jusho;
-  }
-  await worker.setParameters({ tessedit_pageseg_mode: "6" });
-  const { data } = await worker.recognize(canvas);
-  let text = normalizeCircledDigits(data.text || "");
-  text = redactMyNumber(text);
-  return text;
-}
-
-// 複数のカメラ欄から同時に呼ばれても、共有workerの設定が混ざらないよう直列化する。
-let ocrQueue = Promise.resolve();
-function runOcr(imageBitmap) {
-  const pending = ocrQueue.then(() => recognizePerson(imageBitmap));
-  ocrQueue = pending.catch(() => {});
-  return pending;
-}
-
-window.Ocr = { runOcr, extractPersonFields };
-
-
-
+window.Ocr={readFields,runOcr,extractPersonFields};
